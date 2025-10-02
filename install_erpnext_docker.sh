@@ -258,8 +258,8 @@ main() {
   require_root
   parse_args "$@"
   check_platform
-  ensure_packages
   remove_conflicting_docker_repos
+  ensure_packages
   setup_docker_repo
   install_docker
   prepare_project_root
