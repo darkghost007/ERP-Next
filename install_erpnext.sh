@@ -52,7 +52,15 @@ fi
 # Notwendige Pakete installieren
 apt-get install -y git python3-dev python3-setuptools python3-pip python3.12-venv \
                    software-properties-common mariadb-server mariadb-client \
-                   redis-server nginx curl xvfb libfontconfig wkhtmltopdf libmysqlclient-dev
+                   redis-server nginx supervisor ansible curl xvfb libfontconfig wkhtmltopdf \
+                   libmysqlclient-dev
+
+# pip für Root so konfigurieren, dass systemweite Pakete installiert werden dürfen (PEP 668)
+mkdir -p /root/.config/pip
+cat > /root/.config/pip/pip.conf <<'PIPCONF'
+[global]
+break-system-packages = true
+PIPCONF
 
 echo ">>> Phase I abgeschlossen."
 
@@ -187,3 +195,4 @@ echo "Ihre Site ist erreichbar unter: http://$SITE_NAME"
 echo "Login-Benutzer: Administrator"
 echo "Passwort: Das von Ihnen in der Variable ADMIN_PASSWORD festgelegte Passwort."
 echo "=========================================================================="
+
