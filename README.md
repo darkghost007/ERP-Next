@@ -28,3 +28,32 @@ Redis, Node.js, Bench, ERPNext) ein und führt das Produktionssetup aus.
 > Hinweis: Das Skript erstellt standardmäßig den Benutzer `frappe` und setzt
 > sichere Standardpasswörter. Für produktive Umgebungen unbedingt anpassen und
 > anschließend SMTP/SSL-Konfiguration sowie Backups einrichten.
+
+
+Für einen externen NGIX:
+
+Details-Tab
+
+Domain Names: erp....
+Forward Hostname/IP: 192.168.178....
+Forward Port: 80
+Scheme: http
+Cache Assets: aus
+Block Common Exploits: an (optional)
+Websockets Support: an
+Custom Nginx Configuration (Advanced)
+
+Nur die Header:
+
+proxy_set_header Host $host;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header X-Forwarded-Host $host;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+proxy_read_timeout 120s;
+SSL-Tab (falls Zertifikat):
+
+Ein Zertifikat auswählen oder über NPM ausstellen.
+„Force SSL“ aktivieren.
