@@ -31,6 +31,12 @@ if [ "$EUID" -ne 0 ]; then
     fi
 fi
 
+
+# Server-IP automatisch ermitteln, falls nicht gesetzt
+if [ -z "$SERVER_IP" ]; then
+    SERVER_IP=$(hostname -I | awk "{print $1}")
+fi
+
 # --- Phase I: Umgebungseinrichtung und Installation der Abhängigkeiten ---
 echo ">>> Phase I: Starte Umgebungseinrichtung und Installation der Abhängigkeiten..."
 
@@ -152,40 +158,84 @@ echo ">>> Phase III abgeschlossen."
 
 echo ">>> Phase IV: Starte Konfiguration der Produktionsumgebung..."
 
-# Ermittle Bench- und Node-Pfade für den Root-Kontext
-BENCH_BIN="/home/$FRAPPE_USER/.local/bin/bench"
-if [ ! -x "$BENCH_BIN" ]; then
-    BENCH_BIN=$(command -v bench 2>/dev/null || true)
-fi
-if [ -z "$BENCH_BIN" ]; then
-    echo "bench konnte nicht gefunden werden. Abbruch." >&2
-    exit 1
+# Site-Konfiguration anpassen (Host-Zuordnung, Default-Site)
+FRAPPE_USER_ENV="$FRAPPE_USER" SITE_ENV="$SITE_NAME" SERVER_IP_ENV="$SERVER_IP" python3 - <<'PYCONF'
+import json, os, pathlib
+bench_root = pathlib.Path(f"/home/{os.environ['FRAPPE_USER_ENV']}/frappe-bench")
+site = os.environ['SITE_ENV']
+server_ip = os.environ.get('SERVER_IP_ENV', '').strip()
+site_config_path = bench_root / 'sites' / site / 'site_config.json'
+if site_config_path.exists():
+    data = json.loads(site_config_path.read_text())
+else:
+    data = {}
+data['host_name'] = site
+host_map = {site: site}
+if server_ip:
+    host_map[server_ip] = site
+data['host_name_map'] = host_map
+site_config_path.write_text(json.dumps(data, indent=2))
+common_path = bench_root / 'sites' / 'common_site_config.json'
+if common_path.exists():
+    common = json.loads(common_path.read_text())
+else:
+    common = {}
+common['default_site'] = site
+common_path.write_text(json.dumps(common, indent=2))
+PYCONF
+
+# Dateirechte für nginx vorbereiten
+chmod o+rx /home/"$FRAPPE_USER"
+chmod o+rx /home/"$FRAPPE_USER"/frappe-bench
+find /home/"$FRAPPE_USER"/frappe-bench/sites -type d -exec chmod 755 {} \;
+find /home/"$FRAPPE_USER"/frappe-bench/sites -type f -exec chmod 644 {} \;
+
+# Supervisor-Konfiguration aus Bench übernehmen
+sudo -u "$FRAPPE_USER" bash -lc 'cd ~/frappe-bench && bench setup supervisor --yes'
+ln -sf /home/"$FRAPPE_USER"/frappe-bench/config/supervisor.conf /etc/supervisor/conf.d/frappe-bench.conf
+systemctl enable --now supervisor
+supervisorctl reread
+supervisorctl update
+
+# nginx-Konfiguration übernehmen und anpassen
+sudo -u "$FRAPPE_USER" bash -lc 'cd ~/frappe-bench && bench setup nginx'
+ln -sf /home/"$FRAPPE_USER"/frappe-bench/config/nginx.conf /etc/nginx/conf.d/frappe-bench.conf
+NGINX_CONF=$(find /etc/nginx -maxdepth 2 -name 'frappe-bench.conf' | head -n1)
+if [ -n "$NGINX_CONF" ]; then
+  python3 - "$NGINX_CONF" "$SITE_NAME" "$SERVER_IP" <<'PYNGINX'
+import sys, pathlib, re
+conf = pathlib.Path(sys.argv[1])
+site = sys.argv[2]
+ip = sys.argv[3].strip()
+text = conf.read_text()
+pattern = rf"(server_name\s+{re.escape(site)})([^;]*);"
+replace = rf"\1\2;"
+if ip:
+    replace = rf"\1\2 {ip};"
+text, count = re.subn(pattern, replace, text, count=1)
+if count == 0 and ip:
+    text = text.replace(f"server_name {site};", f"server_name {site} {ip};", 1)
+if "listen 0.0.0.0:80;" not in text:
+    text = text.replace("listen 80;", "listen 80;\n    listen 0.0.0.0:80;\n    listen 127.0.0.1:80;", 1)
+conf.write_text(text)
+PYNGINX
+  if [ ! -f /etc/nginx/conf.d/00-logging.conf ]; then
+    cat <<'LOGFMT' >/etc/nginx/conf.d/00-logging.conf
+log_format main '$remote_addr - $remote_user [$time_local] "$request" ' \
+                '$status $body_bytes_sent "$http_referer" ' \
+                '"$http_user_agent" "$http_x_forwarded_for"';
+LOGFMT
+  fi
 fi
 
-NVM_DIR="/home/$FRAPPE_USER/.nvm"
-NODE_BIN_PATH=""
-if [ -s "$NVM_DIR/nvm.sh" ]; then
-    NODE_VERSION=$(sudo -u "$FRAPPE_USER" bash -lc 'source ~/.nvm/nvm.sh >/dev/null 2>&1 && nvm current' 2>/dev/null || true)
-    if [ -n "$NODE_VERSION" ] && [ -d "$NVM_DIR/versions/node/$NODE_VERSION/bin" ]; then
-        NODE_BIN_PATH="$NVM_DIR/versions/node/$NODE_VERSION/bin"
-    fi
-fi
+nginx -t
+systemctl enable --now nginx
+systemctl reload nginx
 
-BENCH_PATH_PREFIX="/home/$FRAPPE_USER/.local/bin"
-if [ -n "$NODE_BIN_PATH" ]; then
-    BENCH_PATH_PREFIX="$NODE_BIN_PATH:$BENCH_PATH_PREFIX"
-fi
-BENCH_ROOT_PATH="$BENCH_PATH_PREFIX:$PATH"
-
-# Produktionsdienste einrichten – läuft nun im Root-Kontext
-cd /home/"$FRAPPE_USER"/frappe-bench
-HOME="/home/$FRAPPE_USER" PATH="$BENCH_ROOT_PATH" "$BENCH_BIN" setup production "$FRAPPE_USER"
-HOME="/home/$FRAPPE_USER" PATH="$BENCH_ROOT_PATH" "$BENCH_BIN" setup nginx
-
-# Supervisor neu starten, um die geänderte Konfiguration zu laden
+# Supervisor-Dienste neu starten
 supervisorctl restart all
 
-# Berechtigungen korrigieren
+# Berechtigungen für den Bench-Baum vereinheitlichen
 chown -R "$FRAPPE_USER":"$FRAPPE_USER" /home/"$FRAPPE_USER"
 
 echo ">>> Phase IV abgeschlossen."
@@ -195,4 +245,5 @@ echo "Ihre Site ist erreichbar unter: http://$SITE_NAME"
 echo "Login-Benutzer: Administrator"
 echo "Passwort: Das von Ihnen in der Variable ADMIN_PASSWORD festgelegte Passwort."
 echo "=========================================================================="
+
 
